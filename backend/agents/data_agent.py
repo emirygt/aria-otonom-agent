@@ -1,10 +1,15 @@
 """
 Data Agent — GA4'ten gerçek veri çeker, bağlantı yoksa mock döndürür.
+
+Sprint 2: get_ga4_sprint2() → ga4_service üzerinden gerçek veri.
 """
 from datetime import datetime, timedelta
+import logging
 from typing import Any, Optional
 
 from core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _build_ga4_client(tokens: dict):
@@ -306,3 +311,61 @@ class DataAgent:
             {"page": "/indirim", "sessions": 4_270, "bounce_rate": 0.71, "avg_session_duration": 55},
             {"page": "/yeni-gelenler", "sessions": 3_440, "bounce_rate": 0.45, "avg_session_duration": 134},
         ]
+
+    # ── Sprint 2: Gerçek GA4 verisi (ga4_service üzerinden) ──────
+
+    async def get_ga4_sprint2(
+        self,
+        user_id: str,
+        property_id: str,
+        db,
+        include_daily: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Insight Agent için temiz GA4 özeti.
+
+        Parametreler:
+            user_id     — JWT'den gelen kullanıcı UUID (str)
+            property_id — GA4 mülk ID (ör: "123456789")
+            db          — AsyncSession (route'dan Depends ile gelir)
+            include_daily — True ise günlük seri de eklenir
+
+        Döndürür:
+        {
+            "summary": { active_users, sessions, conversions, ... },
+            "daily":   [ { date, active_users, sessions, conversions }, ... ]  # include_daily=True ise
+            "error":   None | "revoked" | "quota" | "property_not_found" | "unknown"
+        }
+        """
+        from uuid import UUID as _UUID
+        from services.ga4_service import (
+            load_ga4_credentials,
+            fetch_7day_metrics,
+            fetch_daily_series,
+            GA4AuthRevokedError,
+            GA4QuotaExceededError,
+            GA4PropertyNotFoundError,
+        )
+
+        try:
+            creds = await load_ga4_credentials(_UUID(user_id), db)
+            summary = await fetch_7day_metrics(property_id, creds)
+            daily = await fetch_daily_series(property_id, creds, days=7) if include_daily else []
+            return {"summary": summary, "daily": daily, "error": None}
+
+        except GA4AuthRevokedError as e:
+            logger.warning("GA4 yetki iptali | user_id=%s | %s", user_id, e)
+            return {"summary": None, "daily": [], "error": "revoked"}
+        except GA4QuotaExceededError as e:
+            logger.warning("GA4 kota aşımı | user_id=%s | %s", user_id, e)
+            return {"summary": None, "daily": [], "error": "quota"}
+        except GA4PropertyNotFoundError as e:
+            logger.warning("GA4 property bulunamadı | user_id=%s | %s", user_id, e)
+            return {"summary": None, "daily": [], "error": "property_not_found"}
+        except ValueError as e:
+            # Entegrasyon yok → mock fallback
+            logger.info("GA4 entegrasyonu yok, mock döndürülüyor | %s", e)
+            return {"summary": None, "daily": [], "error": "not_connected"}
+        except Exception as e:
+            logger.error("GA4 bilinmeyen hata | user_id=%s | %s", user_id, e)
+            return {"summary": None, "daily": [], "error": "unknown"}
